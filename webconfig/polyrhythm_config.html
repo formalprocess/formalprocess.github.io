@@ -1,0 +1,306 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MIDI Dual-Track Scale Configurator</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 30px auto; line-height: 1.4; color: #222; }
+    .panel { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 18px; background: #fafafa; }
+    .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 14px; }
+    .grid-16 { display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; margin-top: 6px; }
+    .step-box { display: flex; flex-direction: column; align-items: center; }
+    .step-preview { font-size: 0.72rem; color: #555; margin-top: 2px; font-family: monospace; }
+    label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 4px; }
+    input, select { width: 100%; padding: 6px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; background: white; }
+    .grid-16 input { text-align: center; padding: 4px; font-family: monospace; }
+    button { padding: 10px 18px; font-weight: 600; cursor: pointer; border: none; border-radius: 4px; background: #0066cc; color: white; }
+    button:disabled, select:disabled, input:disabled { background: #eee; color: #888; cursor: not-allowed; }
+    #status { display: inline-block; margin-left: 12px; font-weight: 600; color: #0066cc; }
+  </style>
+</head>
+<body>
+
+  <h2>MIDI Device Configurator</h2>
+  <div>
+    <button id="connectBtn">1. Connect USB</button>
+    <button id="saveBtn" disabled>2. Save to EEPROM</button>
+    <span id="status">Disconnected</span>
+  </div>
+  <br>
+
+  <div class="panel">
+    <h3>Channel A Settings</h3>
+    <div class="grid-4">
+      <div>
+        <label for="rootNoteA">Root Note (C0–B7)</label>
+        <select id="rootNoteA" disabled></select>
+      </div>
+      <div>
+        <label for="scalePresetA">Musical Scale</label>
+        <select id="scalePresetA" disabled></select>
+      </div>
+      <div>
+        <label for="midiChannelA">MIDI Channel (1–16)</label>
+        <input type="number" id="midiChannelA" min="1" max="16" disabled>
+      </div>
+      <div>
+        <label for="noteVelocityA">Velocity (0–127)</label>
+        <input type="number" id="noteVelocityA" min="0" max="127" disabled>
+      </div>
+    </div>
+
+    <label>Note Scale A (16 Ascending Relative Offsets from Root)</label>
+    <div class="grid-16" id="scaleA-container"></div>
+  </div>
+
+  <div class="panel">
+    <h3>Channel B Settings</h3>
+    <div class="grid-4">
+      <div>
+        <label for="rootNoteB">Root Note (C0–B7)</label>
+        <select id="rootNoteB" disabled></select>
+      </div>
+      <div>
+        <label for="scalePresetB">Musical Scale</label>
+        <select id="scalePresetB" disabled></select>
+      </div>
+      <div>
+        <label for="midiChannelB">MIDI Channel (1–16)</label>
+        <input type="number" id="midiChannelB" min="1" max="16" disabled>
+      </div>
+      <div>
+        <label for="noteVelocityB">Velocity (0–127)</label>
+        <input type="number" id="noteVelocityB" min="0" max="127" disabled>
+      </div>
+    </div>
+
+    <label>Note Scale B (16 Ascending Relative Offsets from Root)</label>
+    <div class="grid-16" id="scaleB-container"></div>
+  </div>
+
+  <script>
+    const SCALES = {
+      custom:          { name: "-- Custom Offsets --",      intervals: null },
+      chromatic:       { name: "Chromatic",                 intervals: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] },
+      major:           { name: "Major (Ionian)",            intervals: [0, 2, 4, 5, 7, 9, 11] },
+      minor:           { name: "Natural Minor (Aeolian)",   intervals: [0, 2, 3, 5, 7, 8, 10] },
+      harmonicMinor:   { name: "Harmonic Minor",            intervals: [0, 2, 3, 5, 7, 8, 11] },
+      melodicMinor:    { name: "Melodic Minor",             intervals: [0, 2, 3, 5, 7, 9, 11] },
+      dorian:          { name: "Dorian",                    intervals: [0, 2, 3, 5, 7, 9, 10] },
+      phrygian:        { name: "Phrygian",                  intervals: [0, 1, 3, 5, 7, 8, 10] },
+      lydian:          { name: "Lydian",                    intervals: [0, 2, 4, 6, 7, 9, 11] },
+      mixolydian:      { name: "Mixolydian",                intervals: [0, 2, 4, 5, 7, 9, 10] },
+      locrian:         { name: "Locrian",                   intervals: [0, 1, 3, 5, 6, 8, 10] },
+      majorPentatonic: { name: "Major Pentatonic",          intervals: [0, 2, 4, 7, 9] },
+      minorPentatonic: { name: "Minor Pentatonic",          intervals: [0, 3, 5, 7, 10] },
+      blues:           { name: "Blues",                     intervals: [0, 3, 5, 6, 7, 10] },
+      wholeTone:       { name: "Whole Tone",                intervals: [0, 2, 4, 6, 8, 10] }
+    };
+
+    const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+    let port, writer, reader;
+    const statusEl = document.getElementById('status');
+    const saveBtn = document.getElementById('saveBtn');
+
+    function midiToNoteName(midi) {
+      if (midi < 0 || midi > 127) return "---";
+      const name = NOTE_NAMES[midi % 12];
+      const octave = Math.floor(midi / 12) - 1;
+      return `${name}${octave}`;
+    }
+
+    function generate16StepOffsets(intervals) {
+      const steps = [];
+      const len = intervals.length;
+      for (let i = 0; i < 16; i++) {
+        const octave = Math.floor(i / len);
+        const degree = i % len;
+        steps.push(intervals[degree] + (octave * 12));
+      }
+      return steps;
+    }
+
+    function updateNotePreviews(channel) {
+      const rootMidi = parseInt(document.getElementById(`rootNote${channel}`).value, 10) || 0;
+      for (let i = 0; i < 16; i++) {
+        const offset = parseInt(document.getElementById(`scale${channel}_${i}`).value, 10) || 0;
+        const resultingMidi = rootMidi + offset;
+        const previewEl = document.getElementById(`preview${channel}_${i}`);
+        previewEl.textContent = midiToNoteName(resultingMidi);
+        previewEl.style.color = resultingMidi > 127 ? "#cc0000" : "#555";
+      }
+    }
+
+    function setupChannelUI(channel) {
+      const container = document.getElementById(`scale${channel}-container`);
+      const scaleSelect = document.getElementById(`scalePreset${channel}`);
+      const rootSelect = document.getElementById(`rootNote${channel}`);
+
+      for (let midi = 12; midi <= 107; midi++) {
+        const opt = document.createElement('option');
+        opt.value = midi;
+        opt.textContent = `${midiToNoteName(midi)} (${midi})`;
+        if (midi === 60) opt.selected = true;
+        rootSelect.appendChild(opt);
+      }
+
+      for (const [key, scale] of Object.entries(SCALES)) {
+        const opt = document.createElement('option');
+        opt.value = key;
+        opt.textContent = scale.name;
+        scaleSelect.appendChild(opt);
+      }
+
+      for (let i = 0; i < 16; i++) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'step-box';
+
+        const inp = document.createElement('input');
+        inp.type = 'number';
+        inp.min = 0;
+        inp.max = 127;
+        inp.id = `scale${channel}_${i}`;
+        inp.title = `Step ${i + 1} semitone offset`;
+        inp.disabled = true;
+
+        inp.addEventListener('input', () => {
+          scaleSelect.value = 'custom';
+          updateNotePreviews(channel);
+        });
+
+        const preview = document.createElement('span');
+        preview.className = 'step-preview';
+        preview.id = `preview${channel}_${i}`;
+        preview.textContent = "--";
+
+        wrapper.appendChild(inp);
+        wrapper.appendChild(preview);
+        container.appendChild(wrapper);
+      }
+
+      scaleSelect.addEventListener('change', () => {
+        const selected = SCALES[scaleSelect.value];
+        if (!selected || !selected.intervals) return;
+        const offsets = generate16StepOffsets(selected.intervals);
+        for (let i = 0; i < 16; i++) {
+          document.getElementById(`scale${channel}_${i}`).value = offsets[i];
+        }
+        updateNotePreviews(channel);
+      });
+
+      rootSelect.addEventListener('change', () => {
+        updateNotePreviews(channel);
+      });
+    }
+
+    setupChannelUI('A');
+    setupChannelUI('B');
+
+    function setControlsDisabled(state) {
+      document.querySelectorAll('input, select').forEach(el => el.disabled = state);
+      saveBtn.disabled = state;
+    }
+
+    document.getElementById('connectBtn').addEventListener('click', async () => {
+      try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 115200 });
+
+        const textEncoder = new TextEncoderStream();
+        textEncoder.readable.pipeTo(port.writable);
+        writer = textEncoder.writable.getWriter();
+
+        const textDecoder = new TextDecoderStream();
+        port.readable.pipeTo(textDecoder.writable);
+        reader = textDecoder.readable.getReader();
+
+        statusEl.textContent = "Connected! Reading EEPROM...";
+        setControlsDisabled(false);
+
+        readLoop();
+        await sendCommand("GET");
+      } catch (err) {
+        statusEl.textContent = "Error: " + err.message;
+      }
+    });
+
+    saveBtn.addEventListener('click', async () => {
+      const values = [];
+      for (let i = 0; i < 16; i++) values.push(clampByte(document.getElementById(`scaleA_${i}`).value));
+      for (let i = 0; i < 16; i++) values.push(clampByte(document.getElementById(`scaleB_${i}`).value));
+      values.push(clampByte(document.getElementById('rootNoteA').value));
+      values.push(clampByte(document.getElementById('rootNoteB').value));
+      values.push(clampByte(document.getElementById('midiChannelA').value, 1, 16));
+      values.push(clampByte(document.getElementById('midiChannelB').value, 1, 16));
+      values.push(clampByte(document.getElementById('noteVelocityA').value));
+      values.push(clampByte(document.getElementById('noteVelocityB').value));
+
+      await sendCommand("SET:" + values.join(","));
+    });
+
+    function clampByte(val, min = 0, max = 127) {
+      const n = parseInt(val, 10) || 0;
+      return Math.max(min, Math.min(max, n));
+    }
+
+    async function sendCommand(cmd) {
+      if (writer) await writer.write(cmd + "\n");
+    }
+    
+    function detectScalePreset(loadedArray) {
+        for (const entry of Object.entries(SCALES)) {
+            const key = entry.at(0);
+            const scale = entry.at(1);
+            if (!scale.intervals) continue;
+            const generated = generate16StepOffsets(scale.intervals);
+            if (generated.every((val, idx) => val === loadedArray.at(idx))) {
+                return key;
+            }
+        }
+        return 'custom';
+    }
+    
+    async function readLoop() {
+        let buffer = "";
+        while (true) {
+            const result = await reader.read();
+            if (result.done) break;
+            buffer += result.value;
+            let lines = buffer.split("\n");
+            buffer = lines.pop();
+            for (let line of lines) {
+                line = line.trim();
+                if (line.startsWith("CFG:")) {
+                    const parts = line.substring(4).split(",").map(Number);
+                    if (parts.length === 38) {
+                        const scaleA = parts.slice(0, 16);
+                        const scaleB = parts.slice(16, 32);
+                        for (let i = 0; i < 16; i++) document.getElementById(`scaleA_${i}`).value = scaleA.at(i);
+                        for (let i = 0; i < 16; i++) document.getElementById(`scaleB_${i}`).value = scaleB.at(i);
+
+                        document.getElementById('scalePresetA').value = detectScalePreset(scaleA);
+                        document.getElementById('scalePresetB').value = detectScalePreset(scaleB);
+                        document.getElementById('rootNoteA').value = parts.at(32);
+                        document.getElementById('rootNoteB').value = parts.at(33);
+                        document.getElementById('midiChannelA').value = parts.at(34);
+                        document.getElementById('midiChannelB').value = parts.at(35);
+                        document.getElementById('noteVelocityA').value = parts.at(36);
+                        document.getElementById('noteVelocityB').value = parts.at(37);
+                        updateNotePreviews('A');
+                        updateNotePreviews('B');
+                        statusEl.textContent = "Loaded from EEPROM.";
+                    }
+
+                } else if (line === "SAVED") {
+                    statusEl.textContent = "Saved to EEPROM!";
+                } else if (line.startsWith("ERR:")) {
+                    statusEl.textContent = "Device Error: " + line;
+                }
+            }
+        }
+    }
+</script>
+</body>
+</html>

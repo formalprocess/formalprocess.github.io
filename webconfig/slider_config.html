@@ -1,0 +1,145 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ATmega32U4 MIDI Config</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 400px; margin: 40px auto; padding: 20px; background: #f4f4f9; }
+    .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.1); }
+    .field { margin-bottom: 15px; }
+    label { display: block; font-weight: bold; margin-bottom: 5px; }
+    input, select, button { width: 100%; padding: 8px; box-sizing: border-box; font-size: 16px; }
+    button { background: #0066cc; color: white; border: none; border-radius: 4px; cursor: pointer; margin-top: 10px; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+    #status { margin-top: 15px; font-size: 14px; color: #333; font-weight: 500; }
+  </style>
+</head>
+<body>
+
+<div class="card">
+  <h2>MIDI Controller Setup</h2>
+  <button id="connectBtn">Connect Device</button>
+
+  <div class="field" style="margin-top: 20px;">
+    <label for="midiChannel">MIDI Channel (1–16)</label>
+    <select id="midiChannel" disabled></select>
+  </div>
+
+  <div class="field">
+    <label for="ccNumber">CC Number (0–127)</label>
+    <input type="number" id="ccNumber" min="0" max="127" value="74" disabled>
+  </div>
+
+  <button id="saveBtn" disabled>Save to EEPROM</button>
+  <div id="status">Status: Disconnected</div>
+</div>
+
+<script>
+  let port, writer, reader;
+  const connectBtn = document.getElementById('connectBtn');
+  const saveBtn = document.getElementById('saveBtn');
+  const chSelect = document.getElementById('midiChannel');
+  const ccInput = document.getElementById('ccNumber');
+  const statusDiv = document.getElementById('status');
+
+  // Populate MIDI Channels 1-16
+  for (let i = 1; i <= 16; i++) {
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = `Channel ${i}`;
+    chSelect.appendChild(opt);
+  }
+
+  connectBtn.addEventListener('click', async () => {
+    try {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 115200 });
+      await port.setSignals({ dataTerminalReady: true, requestToSend: true });
+
+      const encoder = new TextEncoderStream();
+      encoder.readable.pipeTo(port.writable);
+      writer = encoder.writable.getWriter();
+
+      const decoder = new TextDecoderStream();
+      port.readable.pipeTo(decoder.writable);
+      reader = decoder.readable.getReader();
+
+      chSelect.disabled = false;
+      ccInput.disabled = false;
+      saveBtn.disabled = false;
+      connectBtn.disabled = true;
+      statusDiv.textContent = 'Status: Connected, requesting config...';
+
+      readLoop();
+      
+      // Small delay to ensure ATmega32U4 USB endpoint is ready
+      setTimeout(async () => {
+        console.log("TX -> GET");
+        await writer.write("GET\n");
+      }, 100);
+
+    } catch (err) {
+      statusDiv.textContent = `Error: ${err.message}`;
+      console.error(err);
+    }
+  });
+
+  saveBtn.addEventListener('click', async () => {
+    const ch = parseInt(chSelect.value, 10);
+    const cc = parseInt(ccInput.value, 10);
+
+    if (isNaN(ch) || ch < 1 || ch > 16) {
+      statusDiv.textContent = 'Error: Invalid MIDI Channel selected.';
+      return;
+    }
+    if (isNaN(cc) || cc < 0 || cc > 127) {
+      statusDiv.textContent = 'Error: CC must be between 0 and 127.';
+      return;
+    }
+
+    const payload = `SET:${ch},${cc}\n`;
+    console.log("TX ->", payload.trim());
+    statusDiv.textContent = 'Status: Sending...';
+    await writer.write(payload);
+  });
+
+  async function readLoop() {
+    let buffer = '';
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += value;
+        
+        let lines = buffer.split('\n');
+        buffer = lines.pop(); 
+
+        for (let line of lines) {
+          line = line.trim();
+          if (!line) continue;
+          console.log("RX <-", line);
+
+          if (line.startsWith('CFG:')) {
+            const parts = line.substring(4).split(',');
+            if (parts.length === 2) {
+              chSelect.value = parts[0].trim();
+              ccInput.value = parts[1].trim();
+              statusDiv.textContent = `Status: Loaded (Ch ${parts[0]}, CC ${parts[1]})`;
+            }
+          } else if (line === 'OK') {
+            statusDiv.textContent = 'Status: Saved to EEPROM!';
+          } else if (line.startsWith('ERR')) {
+            statusDiv.textContent = `Device Error: ${line}`;
+          }
+        }
+      }
+    } catch (err) {
+      statusDiv.textContent = `Read Error: ${err.message}`;
+      console.error(err);
+    }
+  }
+</script>
+
+</body>
+</html>
